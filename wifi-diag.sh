@@ -281,12 +281,24 @@ dump_stats() {
   local gw_status="unknown"
   if [[ -n "${gw}" ]]; then
     if do_ping "${gw}" "" 1; then
-      gw_status="reachable"
+      gw_status="pingable"
     else
-      gw_status="unreachable"
+      gw_status="unpingable"
     fi
   else
     gw_status="no-default-gw"
+  fi
+
+  if do_ping "${PUBLIC_DNS_SERVER}" "" 1; then
+    pdnss="pingable"
+  else 
+    pdnss="unpingable"
+  fi
+
+  if do_ping "${PUBLIC_FQDN}" "" 1; then
+    pfqdn="pingable"
+  else
+    pfqdn="unpingable"
   fi
 
   local vpn_iface_opt=""
@@ -295,14 +307,16 @@ dump_stats() {
   fi
   local vpn_status="unknown"
   if do_ping "${VPN_TARGET}" "${vpn_iface_opt}" 1; then
-    vpn_status="reachable"
+    vpn_status="pingable"
   else
-    vpn_status="unreachable"
+    vpn_status="unpingable"
   fi
 
   log "wifi connected=${wifi_connected} ssid='${wifi_ssid}' signal='${wifi_signal}' tx='${wifi_tx}' rx='${wifi_rx}' \
 gateway=${gw}(${gw_status}) \
-vpn_target=${VPN_TARGET}(${vpn_status})"
+vpn_target=${VPN_TARGET}(${vpn_status}) \
+public_dns=${PUBLIC_DNS_SERVER}(${pdnss}) \
+public_fqdn=${PUBLIC_FQDN}(${pfqdn})"
 
   # ---- VPN reachability failure; snapshot ----
   if [[ "${vpn_status}" == "unreachable" || "${wifi_connected}" == "no" ]]; then

@@ -223,6 +223,43 @@ dump_diagnostics() {
       echo
       echo "# OpenVPN sockets (ss -tuna | grep -i openvpn):"
       ss -tuna | grep -i openvpn || echo "No OpenVPN sockets observed"
+
+      echo
+      echo "# Detailed OpenVPN TCP connection states:"
+      ss -tanp 2>/dev/null | grep -E 'openvpn|acvpnagent|:1194|:443.*ESTABLISHED' || echo "No OpenVPN connections found"
+
+      echo
+      echo "# TCP connection state summary:"
+      ss -tan | awk 'NR>1 {state[$1]++} END {for(s in state) printf "  %-15s: %d\n", s, state[s]}' || echo "Connection summary unavailable"
+    fi
+
+    # OpenVPN process information
+    echo
+    echo "# OpenVPN processes:"
+    ps aux 2>/dev/null | grep -E '[o]penvpn|[a]cvpnagent' || echo "No OpenVPN processes found"
+
+    echo
+    echo "# OpenVPN process resources:"
+    ps -C openvpn,acvpnagent -o pid,ppid,%cpu,%mem,vsz,rss,stat,start,time,cmd 2>/dev/null || echo "No OpenVPN processes found"
+
+    # OpenVPN file descriptor usage
+    local openvpn_pids
+    openvpn_pids=$(pgrep -x 'openvpn|acvpnagent' 2>/dev/null || true)
+    if [[ -n "${openvpn_pids}" ]]; then
+      echo
+      echo "# OpenVPN file descriptor usage:"
+      for pid in ${openvpn_pids}; do
+        local fd_count
+        fd_count=$(ls -1 /proc/${pid}/fd 2>/dev/null | wc -l || echo "N/A")
+        printf "  PID %-6s: %s FDs\n" "${pid}" "${fd_count}"
+      done
+    fi
+
+    # OpenVPN management interface (if available)
+    if [[ -S /var/run/openvpn/management.sock ]]; then
+      echo
+      echo "# OpenVPN management interface state:"
+      echo "state" | timeout 2 nc -U /var/run/openvpn/management.sock 2>/dev/null || echo "Management interface unavailable"
     fi
 
   # Journald logs around the event
@@ -230,6 +267,9 @@ dump_diagnostics() {
     echo "# NetworkManager/wpa_supplicant logs (since ${since_when}):"
     journalctl --since "${since_when}" -u NetworkManager -u wpa_supplicant -o short-iso || true
 
+    echo
+    echo "# journalctl: OpenVPN-related lines (pattern search, since ${since_when}):"
+    journalctl --since "${since_when}" -g 'acvpnagent' -o short-iso || true
 
     echo
     echo "# journalctl: OpenVPN-related lines (pattern search, since ${since_when}):"

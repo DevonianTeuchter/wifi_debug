@@ -13,11 +13,13 @@ INTERVAL_SEC=5              # Sampling interval
 SINCE_WINDOW="5 min ago"    # Log lines leading to issue
 LOG_DIR="${PWD}"            # Logging directory
 LOGFILE=""                  # Log file
-VPN_FQDN=""                   # VPN-only FQDN to test (eg. ibm.com)
-VPN_DNS_SERVER=""            # VPN DNS server
-PUBLIC_FQDN="example.com"     # Public domain to sanity-check DNS path
-PUBLIC_DNS_SERVER="8.8.8.8"  # Public DNS server (google!)
-DNS_TIMEOUT=2                 # dig timeout (seconds)
+VPN_FQDN=""                 # VPN-only FQDN to test (eg. ibm.com)
+VPN_DNS_SERVER=""           # VPN DNS server
+PUBLIC_FQDN="example.com"   # Public domain to sanity-check DNS path
+PUBLIC_DNS_SERVER="8.8.8.8" # Public DNS server (google!)
+DNS_TIMEOUT=2               # dig timeout (seconds)
+ROUTE_HASH_INITIAL=""       # Initial routing table hash for change detection
+
 
 usage() {
   cat <<EOF
@@ -311,15 +313,37 @@ dump_stats() {
   else
     vpn_status="unpingable"
   fi
+  fi
 
-  log "wifi connected=${wifi_connected} ssid='${wifi_ssid}' signal='${wifi_signal}' tx='${wifi_tx}' rx='${wifi_rx}' \
-gateway=${gw}(${gw_status}) \
-vpn_target=${VPN_TARGET}(${vpn_status}) \
-public_dns=${PUBLIC_DNS_SERVER}(${pdnss}) \
-public_fqdn=${PUBLIC_FQDN}(${pfqdn})"
+  # Check for routing table changes
+  local route_hash_current
+  route_hash_current=$(ip route 2>/dev/null | md5sum | cut -d' ' -f1 || echo "unknown")
+  local route_changed="no"
+  if [[ -n "${ROUTE_HASH_INITIAL}" && "${route_hash_current}" != "${ROUTE_HASH_INITIAL}" ]]; then
+    route_changed="yes"
+  fi
+
+  # Formatted log output with proper field widths
+  {
+    echo "=== Network Status ==="
+    printf "%-20s: %s\n" "WiFi Connected" "${wifi_connected}"
+    printf "%-20s: %s\n" "SSID" "${wifi_ssid:-N/A}"
+    printf "%-20s: %s\n" "Signal" "${wifi_signal:-N/A}"
+    printf "%-20s: %s\n" "TX Bitrate" "${wifi_tx:-N/A}"
+    printf "%-20s: %s\n" "RX Bitrate" "${wifi_rx:-N/A}"
+    printf "%-20s: %s (%s)\n" "Gateway" "${gw:-N/A}" "${gw_status}"
+    printf "%-20s: %s (%s)\n" "VPN Target" "${VPN_TARGET}" "${vpn_status}"
+    if [[ -n "${vpn_ping_stats}" ]]; then
+      printf "%-20s: %s\n" "VPN Ping Stats" "${vpn_ping_stats}"
+    fi
+    printf "%-20s: %s (%s)\n" "Public DNS" "${PUBLIC_DNS_SERVER}" "${pdnss}"
+    printf "%-20s: %s (%s)\n" "Public FQDN" "${PUBLIC_FQDN}" "${pfqdn}"
+    printf "%-20s: %s\n" "Route Changed" "${route_changed}"
+    echo "======================"
+  } | tee -a "$LOGFILE"
 
   # ---- VPN reachability failure; snapshot ----
-  if [[ "${vpn_status}" == "unreachable" || "${wifi_connected}" == "no" ]]; then
+  if [[ "${vpn_status}" == "unpingable" || "${wifi_connected}" == "no" ]]; then
     log "Detected reachability failure. Dumping diagnostics..."
     dump_diagnostics
   fi
@@ -361,6 +385,10 @@ log "Logs will be captured to: ${LOGFILE}"
 
 detect_wifi_iface
 detect_vpn_iface
+
+# Capture initial routing table hash for change detection
+ROUTE_HASH_INITIAL=$(ip route 2>/dev/null | md5sum | cut -d' ' -f1 || echo "unknown")
+log "Initial routing table hash: ${ROUTE_HASH_INITIAL}"
 
 log "Monitoring started. Press Ctrl+C to stop."
 trap 'log "Stopping monitor."; exit 0' INT TERM

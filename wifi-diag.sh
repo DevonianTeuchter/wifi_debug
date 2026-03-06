@@ -2,6 +2,15 @@
 # wifi_diag.sh
 # Monitor Wifi and VPN health in the vain hope of trying to track
 # intermittent failures...
+#
+# - Network interface error/drop counters
+# - OpenVPN process monitoring (CPU, memory, file descriptors)
+# - TCP connection state tracking
+# - Extended ping statistics with packet loss analysis
+# - DNS query timing and resolution path tracking
+# - MTU path discovery
+# - Routing table change detection
+# - Formatted log output for better readability
 
 set -euo pipefail
 
@@ -361,7 +370,7 @@ dump_stats() {
 
   if do_ping "${PUBLIC_DNS_SERVER}" "" 1; then
     pdnss="pingable"
-  else 
+  else
     pdnss="unpingable"
   fi
 
@@ -391,10 +400,10 @@ dump_stats() {
     fi
   else
     if do_ping "${VPN_TARGET}" "" 1; then
-    vpn_status="pingable"
-  else
-    vpn_status="unpingable"
-  fi
+      vpn_status="pingable"
+    else
+      vpn_status="unpingable"
+    fi
   fi
 
   # Check for routing table changes

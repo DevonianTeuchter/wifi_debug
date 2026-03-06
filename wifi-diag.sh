@@ -266,20 +266,20 @@ dump_diagnostics() {
     journalctl --since "${since_when}" -u systemd-resolved -o short-iso || true
     echo "# DNS details:"
     echo "## Public via system resolver:"
-    dig +"time=${DNS_TIMEOUT}" +tries=1 "${PUBLIC_FQDN}" || true
+    dig +"time=${DNS_TIMEOUT}" +tries=1 +stats "${PUBLIC_FQDN}" 2>&1 | grep -E 'Query time:|SERVER:|ANSWER SECTION' || true
     echo
     echo "## Public via explicit servers: ${PUBLIC_DNS_SERVER}"
     echo "### Server ${PUBLIC_DNS_SERVER}:"
-    dig @"${PUBLIC_DNS_SERVER}" +"time=${DNS_TIMEOUT}" +tries=1 "${PUBLIC_FQDN}" || true
+    dig @"${PUBLIC_DNS_SERVER}" +"time=${DNS_TIMEOUT}" +tries=1 +stats "${PUBLIC_FQDN}" 2>&1 | grep -E 'Query time:|SERVER:|ANSWER SECTION' || true
     echo
 
     if [[ -n "${VPN_FQDN}" ]]; then
       echo "## VPN FQDN via system resolver:"
-      dig +"time=${DNS_TIMEOUT}" +tries=1 "${VPN_FQDN}" || true
+      dig +"time=${DNS_TIMEOUT}" +tries=1 +stats "${VPN_FQDN}" 2>&1 | grep -E 'Query time:|SERVER:|ANSWER SECTION' || true
       echo
       if [[ -n "${VPN_DNS_SERVER}" ]]; then
         echo "## VPN FQDN via VPN DNS servers: ${VPN_DNS_SERVER}"
-        dig @"${VPN_DNS_SERVER}" +"time=${DNS_TIMEOUT}" +tries=1 "${VPN_FQDN}" || true
+        dig @"${VPN_DNS_SERVER}" +"time=${DNS_TIMEOUT}" +tries=1 +stats "${VPN_FQDN}" 2>&1 | grep -E 'Query time:|SERVER:|ANSWER SECTION' || true
         echo
       fi
     fi

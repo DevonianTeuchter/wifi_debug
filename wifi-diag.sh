@@ -154,6 +154,34 @@ dump_diagnostics() {
       ip -4 route get "${VPN_TARGET}" || echo "'ip route get' not available"
     fi
 
+    # Network interface error/drop statistics
+    echo
+    echo "# Network interface statistics (${WIFI_IFACE}):"
+    if [[ -d "/sys/class/net/${WIFI_IFACE}/statistics" ]]; then
+      printf "  %-15s: %s\n" "RX_dropped" "$(cat /sys/class/net/${WIFI_IFACE}/statistics/rx_dropped 2>/dev/null || echo 'N/A')"
+      printf "  %-15s: %s\n" "RX_errors" "$(cat /sys/class/net/${WIFI_IFACE}/statistics/rx_errors 2>/dev/null || echo 'N/A')"
+      printf "  %-15s: %s\n" "TX_dropped" "$(cat /sys/class/net/${WIFI_IFACE}/statistics/tx_dropped 2>/dev/null || echo 'N/A')"
+      printf "  %-15s: %s\n" "TX_errors" "$(cat /sys/class/net/${WIFI_IFACE}/statistics/tx_errors 2>/dev/null || echo 'N/A')"
+    else
+      echo "  Statistics unavailable"
+    fi
+
+    if [[ -n "${VPN_IFACE}" && -d "/sys/class/net/${VPN_IFACE}/statistics" ]]; then
+      echo
+      echo "# VPN interface statistics (${VPN_IFACE}):"
+      printf "  %-15s: %s\n" "RX_dropped" "$(cat /sys/class/net/${VPN_IFACE}/statistics/rx_dropped 2>/dev/null || echo 'N/A')"
+      printf "  %-15s: %s\n" "RX_errors" "$(cat /sys/class/net/${VPN_IFACE}/statistics/rx_errors 2>/dev/null || echo 'N/A')"
+      printf "  %-15s: %s\n" "TX_dropped" "$(cat /sys/class/net/${VPN_IFACE}/statistics/tx_dropped 2>/dev/null || echo 'N/A')"
+      printf "  %-15s: %s\n" "TX_errors" "$(cat /sys/class/net/${VPN_IFACE}/statistics/tx_errors 2>/dev/null || echo 'N/A')"
+    fi
+
+    # MTU path discovery
+    if command_exists tracepath; then
+      echo
+      echo "# MTU path discovery to ${VPN_TARGET}:"
+      timeout 10 tracepath -n "${VPN_TARGET}" 2>&1 | head -20 || echo "tracepath failed or timed out"
+    fi
+
      if command_exists iw; then
       echo
       echo "# wifi link (iw dev ${WIFI_IFACE} link):"

@@ -19,7 +19,7 @@ PUBLIC_FQDN="example.com"   # Public domain to sanity-check DNS path
 PUBLIC_DNS_SERVER="8.8.8.8" # Public DNS server (google!)
 DNS_TIMEOUT=2               # dig timeout (seconds)
 ROUTE_HASH_INITIAL=""       # Initial routing table hash for change detection
-
+PING_COUNT=5                 # Number of pings for statistics
 
 usage() {
   cat <<EOF
@@ -308,7 +308,21 @@ dump_stats() {
     vpn_iface_opt="${VPN_IFACE}"
   fi
   local vpn_status="unknown"
-  if do_ping "${VPN_TARGET}" "${vpn_iface_opt}" 1; then
+  local vpn_ping_stats=""
+  
+  # Extended ping statistics for VPN target
+  if [[ -n "${vpn_iface_opt}" ]]; then
+    local ping_output
+    ping_output=$(ping -c "${PING_COUNT}" -W 1 -I "${vpn_iface_opt}" "${VPN_TARGET}" 2>&1 || true)
+    if echo "${ping_output}" | grep -q "0% packet loss"; then
+      vpn_status="pingable"
+      vpn_ping_stats=$(echo "${ping_output}" | grep -E 'packet loss|rtt min' | tr '\n' ' ')
+    else
+      vpn_status="unpingable"
+      vpn_ping_stats=$(echo "${ping_output}" | grep -E 'packet loss' || echo "ping failed")
+    fi
+  else
+    if do_ping "${VPN_TARGET}" "" 1; then
     vpn_status="pingable"
   else
     vpn_status="unpingable"

@@ -29,6 +29,9 @@ PUBLIC_DNS_SERVER="8.8.8.8" # Public DNS server (google!)
 DNS_TIMEOUT=2               # dig timeout (seconds)
 ROUTE_HASH_INITIAL=""       # Initial routing table hash for change detection
 PING_COUNT=5                 # Number of pings for statistics
+JOURNAL_PID=""              # PID of background journal watcher
+DIAG_COOLDOWN=30            # Minimum seconds between diagnostic dumps (avoids log spam)
+LAST_DIAG_TIME=0            # Epoch of last diagnostic dump
 
 usage() {
   cat <<EOF
@@ -48,6 +51,14 @@ Optional:
   -p, --public <name>      Public FQDN to test (default: ${PUBLIC_FQDN})
       --public-dns <server>  Public DNS server (default: ${PUBLIC_DNS_SERVER})
       --dns-timeout <sec>  dig timeout per query (default: ${DNS_TIMEOUT})
+      --cooldown <sec>     Min seconds between diagnostic dumps (default: ${DIAG_COOLDOWN})
+
+Notes:
+  - A background journalctl watcher runs alongside the polling loop. It follows
+    NetworkManager, systemd-resolved, and wpa_supplicant and triggers an immediate
+    diagnostic dump if VPN/DNS-related patterns are detected in journal entries.
+  - The -f/--fqdn option activates an active DNS health probe each interval. When
+    the VPN-only FQDN stops resolving, diagnostics are dumped immediately.
 
 Examples:
   sudo ./wifi_diag.sh -t 10.20.30.40
@@ -338,6 +349,56 @@ dump_diagnostics() {
   log "END SNAPSHOT"
 }
 
+# Guarded diagnostic dump: enforce cooldown to avoid log spam when multiple
+# triggers fire at once (journal watcher + poll loop both detect the same event).
+maybe_dump_diagnostics() {
+  local reason="$1"
+  local now
+  now=$(date +%s)
+  if (( now - LAST_DIAG_TIME < DIAG_COOLDOWN )); then
+    log "Diagnostic dump skipped (cooldown, ${DIAG_COOLDOWN}s). Trigger: ${reason}"
+    return
+  fi
+  LAST_DIAG_TIME="${now}"
+  log "Detected: ${reason}. Dumping diagnostics..."
+  dump_diagnostics
+}
+
+# Background journal watcher.  Follows NetworkManager, systemd-resolved, and
+# wpa_supplicant; fires a diagnostic dump when VPN/DNS-relevant patterns appear.
+start_journal_watcher() {
+  (
+    journalctl -f -n 0 \
+      -u NetworkManager \
+      -u systemd-resolved \
+      -u wpa_supplicant \
+      --output=cat 2>/dev/null \
+    | while IFS= read -r line; do
+        local pat='vpn.*timeout|vpn.*disconnect|vpn.*reconnect|vpn.*stale|acvpn.*error|acvpn.*timeout|acvpn.*reconnect|acvpn.*terminat|resolved.*unreachable|resolved.*timeout|dns.*fail|DNSSEC.*fail|NetworkManager.*vpn.*deactivat|NetworkManager.*vpn.*fail|wpa_supplicant.*CTRL-EVENT-DISCONNECTED|wpa_supplicant.*disconnect'
+        if echo "${line}" | grep -qiE "${pat}"; then
+          echo "[JOURNAL] ${line}" >> "${LOGFILE}"
+          # Signal the main process to do a diagnostic dump.
+          # We write a trigger file rather than calling dump_diagnostics directly
+          # because this runs in a subshell and cannot modify LAST_DIAG_TIME.
+          echo "${line}" > "${LOGFILE}.trigger"
+        fi
+      done
+  ) &
+  JOURNAL_PID=$!
+  log "Journal watcher started (PID ${JOURNAL_PID}), following: NetworkManager, systemd-resolved, wpa_supplicant"
+}
+
+# Check for a pending journal trigger file and act on it.
+check_journal_trigger() {
+  local trigger="${LOGFILE}.trigger"
+  if [[ -f "${trigger}" ]]; then
+    local line
+    line=$(cat "${trigger}")
+    rm -f "${trigger}"
+    maybe_dump_diagnostics "journal alert: ${line}"
+  fi
+}
+
 dump_stats() {
   local link_out
   link_out="$(iw dev "${WIFI_IFACE}" link 2>/dev/null || true)"
@@ -386,7 +447,7 @@ dump_stats() {
   fi
   local vpn_status="unknown"
   local vpn_ping_stats=""
-  
+
   # Extended ping statistics for VPN target
   if [[ -n "${vpn_iface_opt}" ]]; then
     local ping_output
@@ -406,6 +467,35 @@ dump_stats() {
     fi
   fi
 
+  # Active VPN DNS probe — the key check for the "tunnel up but DNS broken" failure mode.
+  # Runs every interval so we catch staleness even when ping still succeeds.
+  local vpn_dns_status="n/a"
+  local vpn_dns_detail=""
+  if [[ -n "${VPN_FQDN}" ]]; then
+    local dig_args=(+"time=${DNS_TIMEOUT}" +tries=1 +stats)
+    local dig_target="${VPN_FQDN}"
+    local dig_output
+    if [[ -n "${VPN_DNS_SERVER}" ]]; then
+      dig_output=$(dig @"${VPN_DNS_SERVER}" "${dig_args[@]}" "${dig_target}" 2>&1 || true)
+    else
+      dig_output=$(dig "${dig_args[@]}" "${dig_target}" 2>&1 || true)
+    fi
+    local query_time
+    query_time=$(echo "${dig_output}" | grep -oP 'Query time: \K[0-9]+' || echo "")
+    local answer_count
+    answer_count=$(echo "${dig_output}" | grep -cP '^\S.*\sIN\s' || echo "0")
+    local rcode
+    rcode=$(echo "${dig_output}" | grep -oP 'status: \K[A-Z]+' || echo "")
+
+    if [[ "${answer_count}" -gt 0 ]]; then
+      vpn_dns_status="resolving"
+      vpn_dns_detail="rcode=${rcode} answers=${answer_count} time=${query_time:-?}ms"
+    else
+      vpn_dns_status="FAILED"
+      vpn_dns_detail="rcode=${rcode:-TIMEOUT} time=${query_time:-?}ms"
+    fi
+  fi
+
   # Check for routing table changes
   local route_hash_current
   route_hash_current=$(ip route 2>/dev/null | md5sum | cut -d' ' -f1 || echo "unknown")
@@ -413,6 +503,9 @@ dump_stats() {
   if [[ -n "${ROUTE_HASH_INITIAL}" && "${route_hash_current}" != "${ROUTE_HASH_INITIAL}" ]]; then
     route_changed="yes"
   fi
+
+  # Check for a journal-watcher trigger before printing status
+  check_journal_trigger
 
   # Formatted log output with proper field widths
   {
@@ -427,16 +520,22 @@ dump_stats() {
     if [[ -n "${vpn_ping_stats}" ]]; then
       printf "%-20s: %s\n" "VPN Ping Stats" "${vpn_ping_stats}"
     fi
+    if [[ "${vpn_dns_status}" != "n/a" ]]; then
+      printf "%-20s: %s (%s)\n" "VPN DNS (${VPN_FQDN})" "${vpn_dns_status}" "${vpn_dns_detail}"
+    fi
     printf "%-20s: %s (%s)\n" "Public DNS" "${PUBLIC_DNS_SERVER}" "${pdnss}"
     printf "%-20s: %s (%s)\n" "Public FQDN" "${PUBLIC_FQDN}" "${pfqdn}"
     printf "%-20s: %s\n" "Route Changed" "${route_changed}"
     echo "======================"
   } | tee -a "$LOGFILE"
 
-  # ---- VPN reachability failure; snapshot ----
-  if [[ "${vpn_status}" == "unpingable" || "${wifi_connected}" == "no" ]]; then
-    log "Detected reachability failure. Dumping diagnostics..."
-    dump_diagnostics
+  # ---- VPN reachability/DNS failure; snapshot ----
+  if [[ "${vpn_status}" == "unpingable" ]]; then
+    maybe_dump_diagnostics "VPN target ${VPN_TARGET} unpingable"
+  elif [[ "${vpn_dns_status}" == "FAILED" ]]; then
+    maybe_dump_diagnostics "VPN DNS resolution failed for ${VPN_FQDN} (${vpn_dns_detail})"
+  elif [[ "${wifi_connected}" == "no" ]]; then
+    maybe_dump_diagnostics "WiFi disconnected"
   fi
 }
 
@@ -454,6 +553,7 @@ while [[ $# -gt 0 ]]; do
     -p|--public) PUBLIC_FQDN="$2"; shift 2;;
     --public-dns) PUBLIC_DNS_SERVER="$2"; shift 2;;
     --dns-timeout) DNS_TIMEOUT="$2"; shift 2;;
+    --cooldown) DIAG_COOLDOWN="$2"; shift 2;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown option: $1"; usage; exit 1;;
   esac
@@ -481,8 +581,20 @@ detect_vpn_iface
 ROUTE_HASH_INITIAL=$(ip route 2>/dev/null | md5sum | cut -d' ' -f1 || echo "unknown")
 log "Initial routing table hash: ${ROUTE_HASH_INITIAL}"
 
+log "Diagnostic cooldown: ${DIAG_COOLDOWN}s"
 log "Monitoring started. Press Ctrl+C to stop."
-trap 'log "Stopping monitor."; exit 0' INT TERM
+
+start_journal_watcher
+
+cleanup() {
+  log "Stopping monitor."
+  if [[ -n "${JOURNAL_PID}" ]]; then
+    kill "${JOURNAL_PID}" 2>/dev/null || true
+  fi
+  rm -f "${LOGFILE}.trigger"
+  exit 0
+}
+trap cleanup INT TERM
 
 while true; do
   dump_stats
